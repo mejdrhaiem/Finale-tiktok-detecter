@@ -1,4 +1,4 @@
-USERNAME = "alkasstvsports"  # sans @
+USERNAME = ".chiming"  # sans @
 
 # Configuration optionnelle pour proxy (décommentez si nécessaire)
 # PROXY = {

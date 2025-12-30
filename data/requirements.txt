@@ -1,3 +1,6 @@
 TikTokLive
 pandas
+openpyxl
+reportlab
+pyinstaller
 
