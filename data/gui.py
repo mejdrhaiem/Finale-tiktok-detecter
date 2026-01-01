@@ -4,13 +4,13 @@ import threading
 import queue
 from datetime import datetime
 import os
-import shutil
 import pandas as pd
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import CommentEvent
 from detector import extract_phone_and_suite
 from storage import save_phone, TXT_FILE, CSV_FILE
 from config import USERNAME, PROXY
+
 # PDF
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
@@ -46,7 +46,6 @@ class TikTokLiveGUI:
         style.configure('Title.TLabel', font=('Segoe UI', 16, 'bold'), background='#1a1a1a', foreground='#ffffff')
         style.configure('Status.TLabel', font=('Segoe UI', 12), background='#1a1a1a', foreground='#00ff00')
 
-        # Couleurs
         bg_dark = "#0d1117"
         bg_medium = "#161b22"
         bg_card = "#21262d"
@@ -83,12 +82,14 @@ class TikTokLiveGUI:
             username_frame,
             textvariable=self.username_var,
             width=25,
-            font=('Segoe UI', 10),
+            font=('Segoe UI', 10, 'bold'),
             bg=bg_medium,
-            fg="#f0f6fc",
+            fg="black",
             insertbackground="#f0f6fc",
             relief=tk.FLAT,
-            bd=5
+            bd=5,
+            state='readonly',
+            justify='center'
         )
         username_entry.pack(side=tk.LEFT)
 
@@ -210,6 +211,19 @@ class TikTokLiveGUI:
         self.comments_text.see(tk.END)
         self.comments_text.tag_config("error", foreground="#ff0000")
 
+    # --- Réinitialiser données live ---
+    def reset_live_data(self):
+        """Réinitialise tous les compteurs et zones de texte après téléchargement ou fin du live"""
+        self.comments_count = 0
+        self.phones_count = 0
+        self.comments_label.config(text="💬 Commentaires: 0")
+        self.phones_label.config(text="📞 Numéros détectés: 0")
+        self.comments_text.delete('1.0', tk.END)
+        self.phones_text.delete('1.0', tk.END)
+        # Supprimer le CSV précédent si besoin
+        if os.path.exists(CSV_FILE):
+            os.remove(CSV_FILE)
+
     # --- TikTok Client ---
     def create_client(self):
         username = self.username_var.get().strip()
@@ -325,201 +339,46 @@ class TikTokLiveGUI:
                                     f"Fichiers générés:\n" + "\n".join(f"  • {f}" for f in files_copied))
             else:
                 messagebox.showwarning("Aucun fichier", "Aucun fichier à télécharger.")
+
+            # --- Réinitialiser les données après téléchargement ---
+            self.reset_live_data()
+
         except Exception as e:
             messagebox.showerror("Erreur", f"Erreur lors du téléchargement:\n{str(e)}")
 
-    def create_excel_from_csv(self, csv_file, excel_file):
-        """Crée un fichier Excel avec formatage depuis le CSV"""
-        try:
-            # Lire le CSV
-            df = pd.read_csv(csv_file, encoding="utf-8")
-            
-            if df.empty:
-                return
-            
-            # Gérer les colonnes manquantes
-            if 'Time' not in df.columns:
-                df['Time'] = 'N/A'
-            if 'User' not in df.columns:
-                df['User'] = ''
-            if 'Phone' not in df.columns:
-                df['Phone'] = ''
-            if 'Suite_Commentaire' not in df.columns:
-                df['Suite_Commentaire'] = ''
-            
-            # Créer un nouveau DataFrame avec les colonnes dans le bon ordre
-            # Chaque colonne est extraite séparément pour garantir la séparation
-            result_df = pd.DataFrame({
-                'Time': df['Time'].astype(str).replace('nan', 'N/A').fillna('N/A'),
-                'User': df['User'].astype(str).replace('nan', '').fillna(''),
-                'Phone': df['Phone'].astype(str).replace('nan', '').fillna(''),
-                'Suite Commentaire': df['Suite_Commentaire'].astype(str).replace('nan', '').fillna('')
-            })
-            
-            # Créer le fichier Excel
-            with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
-                result_df.to_excel(writer, index=False, sheet_name='Numéros Détectés')
-                
-                worksheet = writer.sheets['Numéros Détectés']
-                
-                # Import des styles
-                from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-                
-                # Style de l'en-tête
-                header_font = Font(bold=True, color="FFFFFF", size=12)
-                header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-                border_style = Border(
-                    left=Side(style='thin'),
-                    right=Side(style='thin'),
-                    top=Side(style='thin'),
-                    bottom=Side(style='thin')
-                )
-                
-                # Appliquer le formatage à l'en-tête
-                for cell in worksheet[1]:
-                    cell.font = header_font
-                    cell.fill = header_fill
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
-                    cell.border = border_style
-                
-                # Ajuster la largeur des colonnes
-                worksheet.column_dimensions['A'].width = 20  # Time
-                worksheet.column_dimensions['B'].width = 25  # User
-                worksheet.column_dimensions['C'].width = 15  # Phone
-                worksheet.column_dimensions['D'].width = 40  # Suite Commentaire
-                
-                # Appliquer le formatage aux données
-                for row in worksheet.iter_rows(min_row=2, max_row=worksheet.max_row):
-                    for cell in row:
-                        cell.border = border_style
-                        cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
-                        if cell.row % 2 == 0:
-                            cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
-                
-                # Geler la première ligne
-                worksheet.freeze_panes = 'A2'
-                
-        except Exception as e:
-            raise Exception(f"Erreur Excel: {str(e)}")
-
+    # --- PDF à partir du CSV ---
     def create_pdf_from_csv(self, csv_file, pdf_file):
-        """Crée un PDF formaté avec Time, User, Phone, Suite Commentaire"""
-        try:
-            if not os.path.exists(csv_file):
-                return
-            
-            # Lire le CSV avec gestion des en-têtes manquants
-            # Forcer la colonne Phone à être lue comme string pour éviter les .0
-            expected_cols = ["Time", "User", "Phone", "Suite_Commentaire"]
-            dtype_dict = {'Phone': str}
-            
-            # D'abord essayer de lire avec en-têtes
-            try:
-                df = pd.read_csv(csv_file, encoding="utf-8", dtype=dtype_dict)
-                # Vérifier si les colonnes attendues existent
-                if not all(col in df.columns for col in expected_cols):
-                    # Les colonnes attendues ne sont pas là, relire sans en-têtes
-                    df = pd.read_csv(csv_file, encoding="utf-8", header=None, 
-                                    names=expected_cols, dtype=dtype_dict)
-            except Exception as e:
-                # Si erreur, essayer sans en-têtes
-                try:
-                    df = pd.read_csv(csv_file, encoding="utf-8", header=None, 
-                                    names=expected_cols, dtype=dtype_dict)
-                except:
-                    raise Exception(f"Impossible de lire le fichier CSV: {e}")
-            
-            if df.empty:
-                return
-            
-            # Gérer les colonnes manquantes
-            if 'Time' not in df.columns:
-                df['Time'] = 'N/A'
-            if 'User' not in df.columns:
-                df['User'] = ''
-            if 'Phone' not in df.columns:
-                df['Phone'] = ''
-            if 'Suite_Commentaire' not in df.columns:
-                df['Suite_Commentaire'] = ''
-            
-            # Créer le document PDF
-            doc = SimpleDocTemplate(pdf_file, pagesize=A4)
-            elements = []
-            styles = getSampleStyleSheet()
-            
-            # Titre
-            title_style = styles['Heading1']
-            title_style.alignment = 1  # Centré
-            elements.append(Paragraph("📞 Numéros de Téléphone Détectés", title_style))
-            elements.append(Spacer(1, 12))
-            
-            # Date de génération
-            date_style = styles['Normal']
-            date_text = Paragraph(f"<i>Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M:%S')}</i>", date_style)
-            elements.append(date_text)
-            elements.append(Spacer(1, 20))
-            
-            # Préparer les données pour le tableau
-            data = [["Time", "User", "Phone", "Suite Commentaire"]]
-            
-            for _, row in df.iterrows():
-                time_val = str(row['Time'])[:19] if pd.notna(row.get('Time', '')) else 'N/A'
-                user_val = str(row['User']) if pd.notna(row.get('User', '')) else ''
-                
-                # Convertir le téléphone en string et retirer le .0 si présent (problème float)
-                phone_raw = row.get('Phone', '')
-                if pd.notna(phone_raw):
-                    phone_str = str(phone_raw)
-                    # Retirer .0 à la fin si c'est un nombre entier (cas où pandas lit comme float)
-                    if '.' in phone_str and phone_str.replace('.0', '').replace('-', '').isdigit():
-                        phone_val = phone_str.rstrip('0').rstrip('.')
-                    else:
-                        phone_val = phone_str
-                else:
-                    phone_val = ''
-                
-                suite_val = str(row['Suite_Commentaire']) if pd.notna(row.get('Suite_Commentaire', '')) else ''
-                
-                data.append([time_val, user_val, phone_val, suite_val])
-            
-            # Créer le tableau
-            table = Table(data, colWidths=[1.5*inch, 1.5*inch, 1.2*inch, 2.8*inch])
-            
-            # Style du tableau
-            table.setStyle(TableStyle([
-                # En-tête
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#2d4a87")),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 11),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-                ('TOPPADDING', (0, 0), (-1, 0), 12),
-                
-                # Données
-                ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
-                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-                ('FONTSIZE', (0, 1), (-1, -1), 9),
-                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f5f5")]),
-                
-                # Bordures
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                
-                # Padding
-                ('LEFTPADDING', (0, 0), (-1, -1), 6),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-                ('TOPPADDING', (0, 1), (-1, -1), 6),
-                ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
-            ]))
-            
-            elements.append(table)
-            doc.build(elements)
-            
-        except Exception as e:
-            raise Exception(f"Erreur PDF: {str(e)}")
+        import math
+        if not os.path.exists(csv_file):
+            return
+        df = pd.read_csv(csv_file, dtype=str).fillna('')
+        if df.empty:
+            return
+        doc = SimpleDocTemplate(pdf_file, pagesize=A4)
+        elements = []
+        styles = getSampleStyleSheet()
+        elements.append(Paragraph("📞 Numéros de Téléphone Détectés", styles['Heading1']))
+        elements.append(Spacer(1, 12))
+        elements.append(Paragraph(f"<i>Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M:%S')}</i>", styles['Normal']))
+        elements.append(Spacer(1, 20))
+        data = [["Time", "User", "Phone", "Suite Commentaire"]]
+        for _, row in df.iterrows():
+            data.append([row.get('Time', ''), row.get('User', ''), row.get('Phone', ''), row.get('Suite_Commentaire', '')])
+        table = Table(data, colWidths=[1.5*inch, 1.5*inch, 1.2*inch, 2.8*inch])
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#2d4a87")),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 11),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('TOPPADDING', (0, 0), (-1, 0), 12),
+            ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey)
+        ]))
+        elements.append(table)
+        doc.build(elements)
 
-    # --- Boutons ---
     def update_buttons(self):
         if self.is_running:
             self.start_button.config(state=tk.DISABLED)
@@ -529,12 +388,7 @@ class TikTokLiveGUI:
             self.stop_button.config(state=tk.DISABLED)
 
 
-def main():
+if __name__ == "__main__":
     root = tk.Tk()
     app = TikTokLiveGUI(root)
-    root.protocol("WM_DELETE_WINDOW", lambda: (app.stop_client(), root.destroy()))
     root.mainloop()
-
-
-if __name__ == "__main__":
-    main()

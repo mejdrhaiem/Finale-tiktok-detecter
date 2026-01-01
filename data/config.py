@@ -1,4 +1,4 @@
-USERNAME = ".chiming"  # sans @
+USERNAME = "soltana_rawia2"  # sans @
 
 # Configuration optionnelle pour proxy (décommentez si nécessaire)
 # PROXY = {
