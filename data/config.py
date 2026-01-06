@@ -1,4 +1,4 @@
-USERNAME = "soltana_rawia2"  # sans @
+USERNAME = "soltana_rawia"  # sans @
 
 # Configuration optionnelle pour proxy (décommentez si nécessaire)
 # PROXY = {

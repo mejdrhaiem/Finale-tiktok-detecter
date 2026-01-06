@@ -4,6 +4,7 @@ import threading
 import queue
 from datetime import datetime
 import os
+import shutil  # <--- ADDED THIS IMPORT
 import pandas as pd
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import CommentEvent
@@ -17,7 +18,10 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
-
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 class TikTokLiveGUI:
     def __init__(self, root):
@@ -25,7 +29,12 @@ class TikTokLiveGUI:
         self.root.title("TikTok Live Monitor - Détection de Numéros")
         self.root.geometry("1000x700")
         self.root.configure(bg="#1a1a1a")
-
+        if os.path.exists(CSV_FILE):
+            try:
+                os.remove(CSV_FILE)
+                print("Old session data cleaned.")
+            except Exception as e:
+                print(f"Error cleaning old file: {e}")
         # Variables
         self.client = None
         self.client_thread = None
@@ -108,7 +117,7 @@ class TikTokLiveGUI:
                                      width=14, height=2, state=tk.DISABLED, relief=tk.FLAT,
                                      cursor="hand2", activebackground="#f85149", activeforeground="white")
         self.stop_button.pack(side=tk.LEFT, padx=5)
-        self.download_button = tk.Button(button_frame, text="💾 Télécharger PDF",
+        self.download_button = tk.Button(button_frame, text="💾 Télécharger",
                                          command=self.download_files, bg=accent_blue,
                                          fg="white", font=('Segoe UI', 10, 'bold'),
                                          width=18, height=2, relief=tk.FLAT, cursor="hand2",
@@ -305,13 +314,25 @@ class TikTokLiveGUI:
     # --- Export fichiers ---
     def download_files(self):
         try:
-            if not os.path.exists(CSV_FILE):
+            # 1. Get the absolute path of the CSV BEFORE opening any dialogs
+            current_csv_path = os.path.abspath(CSV_FILE)
+
+            if not os.path.exists(current_csv_path):
                 messagebox.showwarning("Aucun fichier",
                                        "Aucun fichier de commentaires trouvé.\n"
                                        "Les fichiers seront créés lors de la détection de numéros.")
                 return
 
-            dest_folder = filedialog.askdirectory(title="Choisir le dossier de destination pour le PDF")
+            # 2. Check if the CSV actually has data
+            try:
+                df_check = pd.read_csv(current_csv_path)
+                if df_check.empty:
+                    messagebox.showwarning("Aucun fichier", "Le fichier de données est vide.")
+                    return
+            except Exception:
+                pass
+
+            dest_folder = filedialog.askdirectory(title="Choisir le dossier de destination")
             if not dest_folder:
                 return
 
@@ -320,62 +341,141 @@ class TikTokLiveGUI:
             folder_name = f"tiktok_live_{username}_{timestamp}"
             dest_path = os.path.join(dest_folder, folder_name)
             os.makedirs(dest_path, exist_ok=True)
+
             files_copied = []
 
-            if os.path.exists(CSV_FILE):
-                # Générer PDF uniquement
-                try:
-                    pdf_file = os.path.join(dest_path, "phones.pdf")
-                    self.create_pdf_from_csv(CSV_FILE, pdf_file)
-                    if os.path.exists(pdf_file):
-                        files_copied.append("phones.pdf")
-                except Exception as e:
-                    print(f"Erreur lors de la création du fichier PDF: {e}")
+            # 3. Generate PDF and Copy CSV
+            try:
+                # --- PDF GENERATION ---
+                pdf_file = os.path.join(dest_path, "phones.pdf")
+                self.create_pdf_from_csv(current_csv_path, pdf_file)
+
+                if os.path.exists(pdf_file):
+                    files_copied.append("phones.pdf")
+                else:
+                    print("Erreur: Le fichier PDF n'a pas été créé.")
+
+                # --- CSV COPY (NEW CODE) ---
+                dest_csv_file = os.path.join(dest_path, "phones.csv")
+                shutil.copy2(current_csv_path, dest_csv_file)
+                if os.path.exists(dest_csv_file):
+                    files_copied.append("phones.csv")
+
+            except Exception as e:
+                print(f"Erreur lors de la création des fichiers: {e}")
+                messagebox.showerror("Erreur", f"Détail: {str(e)}")
 
             if files_copied:
                 messagebox.showinfo("Téléchargement réussi",
                                     f"Fichiers téléchargés avec succès !\n\n"
                                     f"📁 Dossier: {dest_path}\n\n"
                                     f"Fichiers générés:\n" + "\n".join(f"  • {f}" for f in files_copied))
-            else:
-                messagebox.showwarning("Aucun fichier", "Aucun fichier à télécharger.")
 
-            # --- Réinitialiser les données après téléchargement ---
-            self.reset_live_data()
+                # Only reset data if download was successful
+                self.reset_live_data()
+            else:
+                messagebox.showwarning("Attention", "Aucun fichier n'a pu être généré.")
 
         except Exception as e:
-            messagebox.showerror("Erreur", f"Erreur lors du téléchargement:\n{str(e)}")
+            messagebox.showerror("Erreur", f"Erreur critique lors du téléchargement:\n{str(e)}")
 
-    # --- PDF à partir du CSV ---
+    # --- PDF à partir du CSV (FIXED COLUMNS) ---
     def create_pdf_from_csv(self, csv_file, pdf_file):
-        import math
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib import colors
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+        import os
+        import pandas as pd
+        from datetime import datetime
+
         if not os.path.exists(csv_file):
             return
+
         df = pd.read_csv(csv_file, dtype=str).fillna('')
         if df.empty:
             return
-        doc = SimpleDocTemplate(pdf_file, pagesize=A4)
+
+        # 1. REGISTER FONT
+        try:
+            font_path = "arial.ttf"  # Ensure this file exists in your project
+            pdfmetrics.registerFont(TTFont('ArabicFont', font_path))
+            font_name = 'ArabicFont'
+        except Exception:
+            font_name = 'Helvetica'
+
+        # 2. ARABIC HELPER
+        def process_text(text):
+            if not text:
+                return ""
+            try:
+                reshaped_text = arabic_reshaper.reshape(str(text))
+                bidi_text = get_display(reshaped_text)
+                return bidi_text
+            except Exception:
+                return str(text)
+
+        # 3. SETUP PAGE
+        doc = SimpleDocTemplate(pdf_file, pagesize=A4,
+                                rightMargin=30, leftMargin=30,
+                                topMargin=30, bottomMargin=30)
+
         elements = []
         styles = getSampleStyleSheet()
+
+        # 4. DEFINE CELL STYLE
+        cell_style = ParagraphStyle(
+            name='CellStyle',
+            parent=styles['Normal'],
+            fontName=font_name,
+            fontSize=10,
+            leading=12,
+            alignment=0,
+            textColor=colors.black
+        )
+
+        # Title
         elements.append(Paragraph("📞 Numéros de Téléphone Détectés", styles['Heading1']))
         elements.append(Spacer(1, 12))
-        elements.append(Paragraph(f"<i>Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M:%S')}</i>", styles['Normal']))
+        elements.append(
+            Paragraph(f"<i>Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M:%S')}</i>", styles['Normal']))
         elements.append(Spacer(1, 20))
-        data = [["Time", "User", "Phone", "Suite Commentaire"]]
+
+        # 5. BUILD TABLE DATA
+        headers = ["Time", "User", "Phone", "Suite Commentaire"]
+        header_row = [Paragraph(f"<b>{h}</b>", cell_style) for h in headers]
+        data = [header_row]
+
         for _, row in df.iterrows():
-            data.append([row.get('Time', ''), row.get('User', ''), row.get('Phone', ''), row.get('Suite_Commentaire', '')])
-        table = Table(data, colWidths=[1.5*inch, 1.5*inch, 1.2*inch, 2.8*inch])
+            t_time = row.get('Time', '')
+            t_user = process_text(row.get('User', ''))
+            t_phone = row.get('Phone', '')
+            t_comment = process_text(row.get('Suite_Commentaire', ''))
+
+            data.append([
+                Paragraph(t_time, cell_style),
+                Paragraph(t_user, cell_style),
+                Paragraph(t_phone, cell_style),
+                Paragraph(t_comment, cell_style)
+            ])
+
+        # 6. ADJUST COLUMN WIDTHS
+        col_widths = [1.1 * inch, 1.8 * inch, 1.1 * inch, 3.5 * inch]
+
+        table = Table(data, colWidths=col_widths)
+
         table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#2d4a87")),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 11),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('TOPPADDING', (0, 0), (-1, 0), 12),
-            ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey)
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
         ]))
+
         elements.append(table)
         doc.build(elements)
 

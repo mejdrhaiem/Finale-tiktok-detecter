@@ -6,19 +6,23 @@ from detector import extract_phone_and_suite
 from storage import save_phone
 from config import USERNAME, PROXY
 
+# Global set to track saved numbers in memory
+seen_phones = set()
+
+
 # Fonction pour créer et configurer le client
 def create_client():
     """Crée un nouveau client TikTok Live"""
     client_config = {
         "unique_id": USERNAME,
     }
-    
+
     # Ajouter le proxy si configuré
     if PROXY:
         client_config["proxy"] = PROXY
-    
+
     client = TikTokLiveClient(**client_config)
-    
+
     # Événement commentaire
     @client.on(CommentEvent)
     async def on_comment(event: CommentEvent):
@@ -32,13 +36,21 @@ def create_client():
             results = extract_phone_and_suite(text)
 
             for phone, suite in results:
+                # --- LOGIQUE ANTI-DOUBLON ---
+                # Si le numéro est déjà dans la mémoire, on passe au suivant
+                if phone in seen_phones:
+                    continue
+
+                # Sauvegarde et ajout à la mémoire
                 if save_phone(phone, suite, user):
+                    seen_phones.add(phone)  # Ajoute à la mémoire pour ne plus le traiter
                     print(f"📞 {phone} | 📝 {suite} | 👤 {user}")
         except Exception as e:
             # Gérer les erreurs silencieusement pour éviter les opérations qui se chevauchent
             print(f"⚠️ Erreur lors du traitement du commentaire: {e}")
-    
+
     return client
+
 
 # Fonction pour lancer le client avec retry en cas d'erreur
 def run_with_retry(max_retries=5, delay=5):
@@ -53,7 +65,7 @@ def run_with_retry(max_retries=5, delay=5):
                 except:
                     pass
                 time.sleep(1)  # Attendre un peu avant de recréer
-            
+
             client = create_client()
             if PROXY:
                 print("🔒 Utilisation d'un proxy configuré")
@@ -71,7 +83,7 @@ def run_with_retry(max_retries=5, delay=5):
         except Exception as e:
             error_msg = str(e)
             error_type = type(e).__name__
-            
+
             # Gérer les erreurs 500 API sign (erreur serveur TikTok temporaire)
             if "500" in error_msg or "api sign" in error_msg.lower() or "Internal Server Error" in error_msg:
                 print(f"⚠️ Erreur API serveur TikTok (500): {error_msg}")
@@ -126,6 +138,7 @@ def run_with_retry(max_retries=5, delay=5):
             else:
                 print(f"❌ Erreur inattendue: {error_type}: {error_msg}")
                 raise
+
 
 # Lancer le client
 if __name__ == "__main__":
